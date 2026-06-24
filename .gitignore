@@ -38,6 +38,16 @@ post_training/lerobot/third_party/pi_transformers/
 physical_validation/cross_embodiment_replay_and_score/model/
 physical_validation/cross_embodiment_replay_and_score/log/
 
+
+# RoboTwin-UMI generated outputs and local dependencies
+simulation_evaluation/robotwin_umi/outputs/
+simulation_evaluation/robotwin_umi/logs/
+simulation_evaluation/robotwin_umi/debug_images/
+simulation_evaluation/robotwin_umi/rpc_results/
+simulation_evaluation/robotwin_umi/rpc_shards/
+simulation_evaluation/robotwin_umi/server_logs/
+*.mp4
+
 # Experiment artifacts
 wandb/
 tensorboard/

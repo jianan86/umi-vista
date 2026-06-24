@@ -34,11 +34,10 @@ umi-vista/
   docs/                                             # Detailed installation and evaluation guides
   post_training/lerobot/                            # Vendored LeRobot with VISTA policy support
   simulation_evaluation/libero_umi/                 # LIBERO-UMI runner and summary script
+  simulation_evaluation/robotwin_umi/               # RoboTwin-UMI VISTA evaluation adapter
   physical_validation/cross_embodiment_replay_and_score/
                                                     # Physical replay and scoring tools
 ```
-
-RoboTwin-UMI evaluation code is planned for a later release.
 
 ## Choose What To Install
 
@@ -46,6 +45,7 @@ You can install only the part you need:
 
 - **Post-training / fine-tuning:** install LeRobot with the VISTA policy and the local Transformers fork.
 - **LIBERO-UMI evaluation:** install the post-training environment plus LIBERO simulation dependencies.
+- **RoboTwin-UMI evaluation:** install the post-training environment plus an external RoboTwin checkout and RoboTwin assets.
 - **Physical validation:** install the replay/scoring Python requirements and unpack robot model assets.
 
 The commands below assume Linux, Python 3.10, a CUDA-capable PyTorch installation, and a fresh clone of this repository.
@@ -205,6 +205,38 @@ The runner writes per-suite logs, `eval_info.json` files, and a `summary.tsv` un
 
 If your LIBERO installation does not already include assets, BDDL files, or initial states, see [docs/installation_libero_umi.md](docs/installation_libero_umi.md) for the required `LIBERO_CONFIG_PATH`, asset paths, and optional download commands.
 
+## RoboTwin-UMI Evaluation
+
+RoboTwin-UMI evaluation uses an external RoboTwin installation. Follow the official RoboTwin installation guide for simulator dependencies and assets:
+
+```text
+https://robotwin-platform.github.io/doc/usage/robotwin-install.html
+```
+
+Then point the VISTA runner to your RoboTwin checkout and VISTA checkpoint. The default command runs one smoke task for one episode.
+
+```bash
+cd ${VISTA_ROOT}
+
+ROBOTWIN_ROOT=/path/to/RoboTwin \
+POLICY_PATH=/path/to/vista_robotwin_umi_checkpoint/pretrained_model \
+OUTPUT_ROOT=/path/to/vista_outputs/robotwin_umi_smoke \
+GPU_LIST=0 \
+TEST_NUM=1 \
+bash simulation_evaluation/robotwin_umi/run_robotwin_umi_eval.sh
+```
+
+For full 50-task evaluation, set:
+
+```bash
+TASK_FILE=simulation_evaluation/robotwin_umi/tasks/full_50_tasks.txt \
+TEST_NUM=100 \
+GPU_LIST="0 1 2 3" \
+bash simulation_evaluation/robotwin_umi/run_robotwin_umi_eval.sh
+```
+
+The runner writes `_result.json` files plus `summary.tsv` and `summary.json` under `OUTPUT_ROOT`. RoboTwin assets, checkpoints, videos, debug images, logs, and raw benchmark outputs are intentionally not included in this repository. See [docs/installation_robotwin_umi.md](docs/installation_robotwin_umi.md) for details.
+
 ## Physical Validation
 
 The physical-validation tool replays UMI-style trajectories in robot-specific MuJoCo models and writes trajectory quality scores.
@@ -274,6 +306,7 @@ physical_validation/cross_embodiment_replay_and_score/log/
 
 - [Fine-tuning installation](docs/installation_finetuning.md)
 - [LIBERO-UMI evaluation installation](docs/installation_libero_umi.md)
+- [RoboTwin-UMI evaluation installation](docs/installation_robotwin_umi.md)
 - [Physical validation installation](docs/installation_physical_validation.md)
 
 ## Citation
