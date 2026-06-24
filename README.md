@@ -18,6 +18,7 @@ VISTA adapts UMI-collected demonstrations for VLA policy training. It addresses 
 
 - VISTA policy integration in LeRobot for post-training and downstream fine-tuning.
 - LIBERO-UMI evaluation runners for VISTA checkpoints.
+- RoboTwin-UMI evaluation for the improved version of the benchmark.
 - Cross-embodiment physical validation tools for replaying and scoring UMI-style trajectories.
 
 Datasets and model checkpoints are released through the Hugging Face collection:
