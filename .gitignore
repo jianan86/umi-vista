@@ -58,3 +58,14 @@ tb_logs/
 .idea/
 .vscode/
 *.swp
+
+
+# --- Lerobot vendored source: do NOT ignore its source/test packages named "datasets" ---
+# The generic `datasets/` rule above is for data artifacts; these are Python source/tests
+# that merely live in a dir called `datasets`. Binary test fixtures (*.safetensors) stay ignored.
+!post_training/lerobot/src/lerobot/datasets/
+!post_training/lerobot/src/lerobot/datasets/**
+!post_training/lerobot/tests/datasets/
+!post_training/lerobot/tests/datasets/**
+!post_training/lerobot/tests/artifacts/datasets/
+!post_training/lerobot/tests/artifacts/datasets/save_dataset_to_safetensors.py
