@@ -105,6 +105,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 "Either 'tokenizer' or 'tokenizer_name' must be provided. "
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
+        self.input_tokenizer.padding_side = self.padding_side
 
     def get_task(self, transition: EnvTransition) -> list[str] | None:
         """

@@ -150,8 +150,10 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
         return None
 
     def _save_pretrained(self, save_directory: Path) -> None:
-        with open(save_directory / CONFIG_NAME, "w") as f, draccus.config_type("json"):
-            draccus.dump(self, f, indent=4)
+        config = draccus.encode(self)
+        config["type"] = self.type
+        with open(save_directory / CONFIG_NAME, "w") as f:
+            json.dump(config, f, indent=4)
 
     @classmethod
     def from_pretrained(
@@ -192,23 +194,26 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
                     f"{CONFIG_NAME} not found on the HuggingFace Hub in {model_id}"
                 ) from e
 
+        if config_file is None:
+            raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
+
+        original_config_file = config_file
+        with open(config_file) as f:
+            config = json.load(f)
+
+        config.pop("type", None)
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
+            json.dump(config, f)
+            config_file = f.name
+
         # HACK: Parse the original config to get the config subclass, so that we can
         # apply cli overrides.
         # This is very ugly, ideally we'd like to be able to do that natively with draccus
         # something like --policy.path (in addition to --policy.type)
         with draccus.config_type("json"):
-            orig_config = draccus.parse(cls, config_file, args=[])
-
-        if config_file is None:
-            raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
-
-        with open(config_file) as f:
-            config = json.load(f)
-
-        config.pop("type")
-        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
-            json.dump(config, f)
-            config_file = f.name
+            orig_config = draccus.parse(
+                cls, original_config_file if cls is PreTrainedConfig else config_file, args=[]
+            )
 
         cli_overrides = policy_kwargs.pop("cli_overrides", [])
         with draccus.config_type("json"):

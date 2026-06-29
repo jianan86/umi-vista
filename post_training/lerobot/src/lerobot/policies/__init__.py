@@ -14,7 +14,6 @@
 
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
-from .groot.configuration_groot import GrootConfig as GrootConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .vista.configuration_vista import VISTAConfig as VISTAConfig
@@ -33,6 +32,5 @@ __all__ = [
     "SmolVLAConfig",
     "TDMPCConfig",
     "VQBeTConfig",
-    "GrootConfig",
     "WallXConfig"
 ]

@@ -1204,7 +1204,31 @@ class VISTAPolicy(PreTrainedPolicy):
         return fixed_state_dict
 
     def get_optim_params(self) -> dict:
-        return self.parameters()
+        if not self.config.train_action_expert_only:
+            return self.parameters()
+
+        trainable_prefixes = (
+            "model.paligemma_with_expert.gemma_expert.",
+            "model.action_in_proj.",
+            "model.action_out_proj.",
+            "model.time_mlp_in.",
+            "model.time_mlp_out.",
+        )
+        optim_params = []
+        for name, param in self.named_parameters():
+            param.requires_grad = name.startswith(trainable_prefixes)
+            if param.requires_grad:
+                optim_params.append(param)
+
+        trainable_params = sum(p.numel() for p in optim_params)
+        total_params = sum(p.numel() for p in self.parameters())
+        print(
+            "VISTA train_action_expert_only enabled: "
+            f"trainable_params={trainable_params} total_params={total_params}"
+        )
+        if not optim_params:
+            raise ValueError("No VISTA action expert parameters were selected for training.")
+        return optim_params
 
     def reset(self):
         """Reset internal state - called when environment resets."""
