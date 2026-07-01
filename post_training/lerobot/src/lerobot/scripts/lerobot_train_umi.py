@@ -201,6 +201,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         dataset = make_dataset(cfg)
         if cfg.policy.use_delta_action:
             logging.info("Using delta action transform on dataset")
+            if getattr(cfg.policy, "use_relative_state", False):
+                logging.info("Using previous-state relative to current-state input")
             dataset.load_delta_action_norm_stats()
         else:
             logging.info("Using absolute action transform on dataset")
@@ -220,7 +222,6 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             dataset.load_abs_action_norm_stats()
 
     # import ipdb;ipdb.set_trace()
-    dataset[0]
     # import ipdb;ipdb.set_trace()
 
     # Create environment used for evaluating checkpoints during training on simulation data.
@@ -310,12 +311,21 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    drop_n_first_frames = 1 if getattr(cfg.policy, "use_relative_state", False) else 0
+    drop_n_last_frames = getattr(cfg.policy, "drop_n_last_frames", 0)
+    if drop_n_first_frames or drop_n_last_frames:
         shuffle = False
+        if dataset.is_legacy_version:
+            dataset_from_indices = dataset.episode_data_index["from"]
+            dataset_to_indices = dataset.episode_data_index["to"]
+        else:
+            dataset_from_indices = dataset.meta.episodes["dataset_from_index"]
+            dataset_to_indices = dataset.meta.episodes["dataset_to_index"]
         sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
-            drop_n_last_frames=cfg.policy.drop_n_last_frames,
+            dataset_from_indices,
+            dataset_to_indices,
+            drop_n_first_frames=drop_n_first_frames,
+            drop_n_last_frames=drop_n_last_frames,
             shuffle=True,
         )
     else:

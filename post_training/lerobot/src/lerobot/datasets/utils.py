@@ -48,6 +48,7 @@ from lerobot.datasets.backward_compatibility import (
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STR
 from lerobot.utils.utils import SuppressProgressBars, is_valid_numpy_dtype_string
 from lerobot.datasets.normalize import RunningStats, serialize_json
+from lerobot.datasets.sampler import EpisodeAwareSampler
 
 DEFAULT_CHUNK_SIZE = 1000  # Max number of files per chunk
 DEFAULT_DATA_FILE_SIZE_IN_MB = 100  # Max size per file
@@ -1371,17 +1372,33 @@ def compute_norm_stats(
     num_workers=64,
     batch_size=100,
     use_delta_action: bool = True,
+    use_relative_state: bool = False,
 ):
+    sampler = None
+    if use_relative_state:
+        if dataset.is_legacy_version:
+            dataset_from_indices = dataset.episode_data_index["from"]
+            dataset_to_indices = dataset.episode_data_index["to"]
+        else:
+            dataset_from_indices = dataset.meta.episodes["dataset_from_index"]
+            dataset_to_indices = dataset.meta.episodes["dataset_to_index"]
+        sampler = EpisodeAwareSampler(
+            dataset_from_indices,
+            dataset_to_indices,
+            drop_n_first_frames=1,
+        )
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
     )
 
-    num_batches = len(dataset) // batch_size
+    sample_count = len(sampler) if sampler is not None else len(dataset)
+    num_batches = (sample_count + batch_size - 1) // batch_size
     stats = {key: RunningStats() for key in keys}
     
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
@@ -1398,7 +1415,8 @@ def compute_norm_stats(
                 "Please set delta_timestamps before computing delta-action normalization stats."
             )
         action_chunk_size = len(dataset.delta_indices['action'])
-        output_path = dataset.root / 'meta' / f'delta_action_ck{action_chunk_size}_norm_stats.json'
+        prefix = "relative_state_" if use_relative_state else ""
+        output_path = dataset.root / "meta" / f"{prefix}delta_action_ck{action_chunk_size}_norm_stats.json"
     else:
         output_path = dataset.root / 'meta' / 'abs_action_norm_stats.json'
 
@@ -1409,6 +1427,7 @@ def load_norm_stats(
     local_dir: Path,
     action_chunk_size: int | None = None,
     use_delta_action: bool = True,
+    use_relative_state: bool = False,
 ) -> dict[str, dict[str, np.ndarray]]:
     if use_delta_action:
         if action_chunk_size is None:
@@ -1423,7 +1442,8 @@ def load_norm_stats(
                 "Please pass action_chunk_size explicitly."
             )
         else:
-            norm_stats_path = local_dir / 'meta' / f'delta_action_ck{action_chunk_size}_norm_stats.json'
+            prefix = "relative_state_" if use_relative_state else ""
+            norm_stats_path = local_dir / "meta" / f"{prefix}delta_action_ck{action_chunk_size}_norm_stats.json"
     else:
         norm_stats_path = local_dir / 'meta' / 'abs_action_norm_stats.json'
 

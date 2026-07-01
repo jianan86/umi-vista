@@ -38,6 +38,7 @@ import draccus
 import grpc
 import torch
 
+from lerobot.datasets.transforms import make_relative_state
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.processor import (
     PolicyAction,
@@ -48,6 +49,7 @@ from lerobot.transport import (
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
+from lerobot.utils.constants import OBS_STATE
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -329,6 +331,50 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         return chunk[:, : self.actions_per_chunk, :]
 
+    def _make_vista_action_mask(self, action_dim: int, device: torch.device) -> torch.Tensor:
+        """Mask dimensions that were converted to delta actions during Vista training."""
+        if action_dim != 16:
+            raise ValueError(f"Vista async inference expects 16D actions, got action_dim={action_dim}")
+
+        mask = torch.ones(action_dim, dtype=torch.bool, device=device)
+        mask[[7, 15]] = False
+        return mask
+
+    def _postprocess_action_chunk(
+        self, action_tensor: torch.Tensor, raw_state: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply policy postprocessor and Vista-specific delta-to-absolute conversion."""
+        _, chunk_size, _ = action_tensor.shape
+
+        processed_actions = []
+        for i in range(chunk_size):
+            single_action = action_tensor[:, i, :]
+            processed_action = self.postprocessor(single_action)
+            processed_actions.append(processed_action)
+
+        action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
+
+        if self.policy_type == "vista":
+            if action_tensor.ndim != 2:
+                raise ValueError(
+                    f"Vista action chunk must be 2D after postprocessing, got {action_tensor.shape}"
+                )
+            action_dim = action_tensor.shape[-1]
+            mask = self._make_vista_action_mask(action_dim, action_tensor.device)
+
+            if getattr(self.policy.config, "use_delta_action", False):
+                state = raw_state.to(device=action_tensor.device, dtype=action_tensor.dtype)
+                if state.ndim == 2:
+                    state = state.squeeze(0)
+                if state.shape[-1] < action_dim:
+                    raise ValueError(
+                        f"Vista raw observation.state must have at least {action_dim} dims, got {state.shape}"
+                    )
+                state = state[..., :action_dim].unsqueeze(0)
+                action_tensor[..., :action_dim] += torch.where(mask, state, torch.zeros_like(state))
+
+        return action_tensor
+
     def _predict_action_chunk(self, observation_t: TimedObservation) -> list[TimedAction]:
         """Predict an action chunk based on an observation.
 
@@ -346,6 +392,23 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.lerobot_features,
             self.policy_image_features,
         )
+        raw_state = observation[OBS_STATE].clone()
+        if self.policy_type == "vista" and getattr(self.policy.config, "use_relative_state", False):
+            previous_state = observation_t.previous_state
+            if previous_state is None:
+                self.logger.info("Skipping Vista inference until previous_state is available")
+                return []
+            previous_state = torch.as_tensor(previous_state, dtype=raw_state.dtype)
+            if previous_state.ndim == 1:
+                previous_state = previous_state.unsqueeze(0)
+            if previous_state.shape != raw_state.shape:
+                raise ValueError(
+                    f"Vista previous_state shape must match current state: {previous_state.shape} != {raw_state.shape}"
+                )
+            if not torch.isfinite(previous_state).all() or not torch.isfinite(raw_state).all():
+                raise ValueError("Vista previous_state and current state must contain only finite values")
+            state_mask = self._make_vista_action_mask(raw_state.shape[-1], raw_state.device)
+            observation[OBS_STATE] = make_relative_state(previous_state, raw_state, state_mask)
         prepare_time = time.perf_counter() - start_prepare
 
         """2. Apply preprocessor"""
@@ -367,18 +430,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # Postprocessor expects (B, action_dim) per action, but we have (B, chunk_size, action_dim)
         # So we process each action in the chunk individually
         start_postprocess = time.perf_counter()
-        _, chunk_size, _ = action_tensor.shape
-
-        # Process each action in the chunk
-        processed_actions = []
-        for i in range(chunk_size):
-            # Extract action at timestep i: (B, action_dim)
-            single_action = action_tensor[:, i, :]
-            processed_action = self.postprocessor(single_action)
-            processed_actions.append(processed_action)
-
-        # Stack back to (B, chunk_size, action_dim), then remove batch dim
-        action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
+        action_tensor = self._postprocess_action_chunk(action_tensor, raw_state=raw_state)
         self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
 
         """5. Convert to TimedAction list"""

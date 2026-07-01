@@ -34,7 +34,7 @@ from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
-from lerobot.datasets.transforms import DeltaActionTransform
+from lerobot.datasets.transforms import DeltaActionTransform, make_relative_state
 from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
     DEFAULT_FEATURES,
@@ -761,6 +761,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         video_backend: str | None = None,
         batch_encoding_size: int = 1,
         use_delta_action: bool = False,
+        use_relative_state: bool = False,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -955,6 +956,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.action_mask[-1] = False
 
         self.use_delta_action = use_delta_action
+        self.use_relative_state = use_relative_state
+        if self.use_relative_state and not self.use_delta_action:
+            raise ValueError("use_relative_state requires use_delta_action=true")
         if self.use_delta_action:
             self.delta_action_transform = DeltaActionTransform(self.action_mask)
 
@@ -1088,12 +1092,21 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def load_delta_action_norm_stats(self):
         action_chunk_size = len(self.delta_indices['action'])
 
-        norm_stats_path = self.root / 'meta' / f'delta_action_ck{action_chunk_size}_norm_stats.json'
+        prefix = "relative_state_" if self.use_relative_state else ""
+        norm_stats_path = self.root / "meta" / f"{prefix}delta_action_ck{action_chunk_size}_norm_stats.json"
 
         if not norm_stats_path.exists():
-            compute_norm_stats(self, keys = self.get_state_action_keys())
+            compute_norm_stats(
+                self,
+                keys=self.get_state_action_keys(),
+                use_relative_state=self.use_relative_state,
+            )
 
-        norm_stats = load_norm_stats(self.root, action_chunk_size)
+        norm_stats = load_norm_stats(
+            self.root,
+            action_chunk_size,
+            use_relative_state=self.use_relative_state,
+        )
         
         self.meta.update_norm_stats(norm_stats)
     
@@ -1331,6 +1344,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # import ipdb;ipdb.set_trace()
         if self.use_delta_action:
             item = self.delta_action_transform(item)
+        if self.use_relative_state:
+            if self.is_legacy_version:
+                ep_start = self.episode_data_index["from"][ep_idx]
+            else:
+                ep_start = self.meta.episodes[ep_idx]["dataset_from_index"]
+            if idx <= ep_start:
+                raise IndexError("Relative-state samples require a previous frame in the same episode")
+            previous_state = self.hf_dataset[idx - 1]["observation.state"]
+            item["observation.state"] = make_relative_state(
+                previous_state,
+                item["observation.state"],
+                self.action_mask,
+            )
 
         # import ipdb;ipdb.set_trace()
         if len(self.meta.video_keys) > 0:

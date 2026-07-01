@@ -228,6 +228,7 @@ class TimedAction(TimedData):
 class TimedObservation(TimedData):
     observation: RawObservation
     must_go: bool = False
+    previous_state: torch.Tensor | None = None
 
     def get_observation(self):
         return self.observation

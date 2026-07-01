@@ -217,3 +217,101 @@ def test_predict_action_chunk(monkeypatch, policy_server):
     for i, ta in enumerate(timed_actions):
         expected_ts = obs.get_timestamp() + i * policy_server.config.environment_dt
         assert abs(ta.get_timestamp() - expected_ts) < 1e-6
+
+
+def test_vista_postprocess_delta_action_to_absolute(policy_server):
+    """Vista delta actions are converted back to absolute actions, except gripper dims."""
+    policy_server.policy_type = "vista"
+    policy_server.policy.config.use_delta_action = True
+    policy_server.postprocessor = lambda tensor: tensor
+
+    state = torch.arange(16, dtype=torch.float32).unsqueeze(0)
+    delta_chunk = torch.ones(1, 2, 16, dtype=torch.float32)
+
+    action = policy_server._postprocess_action_chunk(delta_chunk, raw_state=state)
+
+    expected = torch.ones(2, 16, dtype=torch.float32) + state.squeeze(0)
+    expected[:, [7, 15]] = 1.0
+    torch.testing.assert_close(action, expected)
+
+
+def test_vista_postprocess_requires_16d_actions(policy_server):
+    policy_server.policy_type = "vista"
+    policy_server.policy.config.use_delta_action = False
+    policy_server.postprocessor = lambda tensor: tensor
+
+    with pytest.raises(ValueError, match="expects 16D actions"):
+        policy_server._postprocess_action_chunk(torch.zeros(1, 2, 14), raw_state=torch.zeros(1, 16))
+
+
+def test_relative_state_uses_delta_mask():
+    from lerobot.datasets.transforms import make_relative_state
+
+    current = torch.arange(16, dtype=torch.float32).unsqueeze(0)
+    previous = current + 2
+    mask = torch.ones(16, dtype=torch.bool)
+    mask[[7, 15]] = False
+
+    relative = make_relative_state(previous, current, mask)
+
+    expected = torch.full_like(current, 2.0)
+    expected[:, [7, 15]] = previous[:, [7, 15]]
+    torch.testing.assert_close(relative, expected)
+
+
+def test_vista_relative_state_preprocess_and_absolute_restore(monkeypatch, policy_server):
+    from lerobot.async_inference.helpers import TimedObservation
+
+    names = [f"joint{i}" for i in range(16)]
+    policy_server.lerobot_features = {
+        OBS_STATE: {"dtype": "float32", "shape": [16], "names": names}
+    }
+    policy_server.policy_type = "vista"
+    policy_server.policy.config.use_relative_state = True
+    policy_server.policy.config.use_delta_action = True
+    policy_server.actions_per_chunk = 2
+
+    captured = {}
+
+    def preprocess(observation):
+        captured["state"] = observation[OBS_STATE].clone()
+        return observation
+
+    policy_server.preprocessor = preprocess
+    policy_server.postprocessor = lambda tensor: tensor
+    monkeypatch.setattr(
+        policy_server,
+        "_get_action_chunk",
+        lambda observation: torch.zeros(1, 2, 16),
+    )
+
+    current = torch.arange(16, dtype=torch.float32)
+    previous = current + 2
+    observation = TimedObservation(
+        timestamp=time.time(),
+        timestep=1,
+        observation={**{name: current[i].item() for i, name in enumerate(names)}, "task": "test"},
+        previous_state=previous,
+    )
+
+    actions = policy_server._predict_action_chunk(observation)
+
+    expected_state = torch.full((1, 16), 2.0)
+    expected_state[:, [7, 15]] = previous[[7, 15]]
+    torch.testing.assert_close(captured["state"], expected_state)
+    expected_action = current.clone()
+    expected_action[[7, 15]] = 0
+    torch.testing.assert_close(actions[0].get_action(), expected_action)
+
+
+def test_vista_relative_state_skips_first_observation(policy_server):
+    policy_server.policy_type = "vista"
+    policy_server.policy.config.use_relative_state = True
+    names = [f"joint{i}" for i in range(16)]
+    policy_server.lerobot_features = {
+        OBS_STATE: {"dtype": "float32", "shape": [16], "names": names}
+    }
+    observation = _make_obs(torch.zeros(6), timestep=0)
+    observation.observation = {**{name: 0.0 for name in names}, "task": "test"}
+
+    assert policy_server._predict_action_chunk(observation) == []

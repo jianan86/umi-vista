@@ -28,6 +28,32 @@ from torchvision.transforms.v2 import (
 
 
 ### newly added
+def make_relative_state(
+    previous_state: torch.Tensor,
+    current_state: torch.Tensor,
+    state_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Return previous state relative to current state on masked dimensions."""
+    if previous_state.shape != current_state.shape:
+        raise ValueError(
+            f"Previous and current state shapes must match, got {previous_state.shape} and {current_state.shape}"
+        )
+    if previous_state.shape[-1] < state_mask.shape[0]:
+        raise ValueError(
+            f"State dimension {previous_state.shape[-1]} is smaller than mask dimension {state_mask.shape[0]}"
+        )
+
+    mask = state_mask.to(device=previous_state.device)
+    dims = mask.shape[0]
+    relative_state = previous_state.clone()
+    relative_state[..., :dims] = torch.where(
+        mask,
+        previous_state[..., :dims] - current_state[..., :dims],
+        previous_state[..., :dims],
+    )
+    return relative_state
+
+
 class DeltaActionTransform(Transform):
     """Transform absolute actions into delta action space.
     

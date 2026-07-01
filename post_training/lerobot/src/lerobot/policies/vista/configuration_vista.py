@@ -25,6 +25,8 @@ from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 @PreTrainedConfig.register_subclass("vista")
 @dataclass
 class VISTAConfig(PreTrainedConfig):
+    use_relative_state: bool = False
+
     paligemma_variant: str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     dtype: str = "float32"  # Options: "bfloat16", "float32"
@@ -86,6 +88,9 @@ class VISTAConfig(PreTrainedConfig):
         super().__post_init__()
 
         # Validate configuration
+        if self.use_relative_state and not self.use_delta_action:
+            raise ValueError("use_relative_state requires use_delta_action=true")
+
         if self.n_action_steps > self.chunk_size:
             raise ValueError(
                 f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
@@ -147,7 +152,8 @@ class VISTAConfig(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
+        start_index = 1 if self.use_relative_state else 0
+        return list(range(start_index, start_index + self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:

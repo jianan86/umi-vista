@@ -81,6 +81,9 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
     Returns:
         LeRobotDataset | MultiLeRobotDataset
     """
+    if getattr(cfg.policy, "use_relative_state", False) and cfg.dataset.streaming:
+        raise ValueError("use_relative_state is not supported with streaming datasets")
+
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
@@ -114,6 +117,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 revision=cfg.dataset.revision,
                 video_backend=cfg.dataset.video_backend,
                 use_delta_action=cfg.policy.use_delta_action,
+                use_relative_state=getattr(cfg.policy, "use_relative_state", False),
             )
 
             # --- Stop timing after dataset construction ---
