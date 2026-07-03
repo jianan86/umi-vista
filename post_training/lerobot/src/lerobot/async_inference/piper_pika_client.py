@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle  # nosec
 import threading
@@ -30,6 +31,19 @@ ARM_NAMES = ("x", "y", "z", "qx", "qy", "qz", "qw", "gripper_width")
 STATE_NAMES = tuple(f"robot_{robot_index}_{name}" for robot_index in (0, 1) for name in ARM_NAMES)
 LEFT_SLICE = slice(0, 8)
 RIGHT_SLICE = slice(8, 16)
+_PIPER_FATAL_STATUS_TERMS = (
+    "NO_SOLUTION",
+    "SINGULARITY_POINT",
+    "TARGET_POS_EXCEEDS_LIMIT",
+    "EMERGENCY_STOP",
+    "JOINT_COMMUNICATION_ERR",
+    "JOINT_BRAKE_NOT_RELEASED",
+    "COLLISION_OCCURRED",
+    "JOINT_STATUS_ERR",
+    "OTHER_ERR",
+    "MAIN_CONTROLLER_NTC_OVER_TEMPERATURE",
+    "RELEASE_RESISTOR_NTC_OVER_TEMPERATURE",
+)
 
 R_EE_TCP = np.array(
     [
@@ -181,10 +195,13 @@ def center_crop_resize_rgb(image: np.ndarray, size: int = 224) -> np.ndarray:
 def limit_tcp_rpy_step(current: np.ndarray, target: np.ndarray, cfg: "PiperPikaClientConfig") -> np.ndarray:
     target = np.asarray(target, dtype=np.float32).copy()
     current = np.asarray(current, dtype=np.float32)
-    target[:3] = current[:3] + np.clip(target[:3] - current[:3], -cfg.max_pos_step, cfg.max_pos_step)
-    target[3:6] = current[3:6] + np.clip(target[3:6] - current[3:6], -cfg.max_rot_step, cfg.max_rot_step)
+    max_pos_step = np.inf if cfg.max_pos_step is None else cfg.max_pos_step
+    max_rot_step = np.inf if cfg.max_rot_step is None else cfg.max_rot_step
+    max_gripper_step_mm = np.inf if cfg.max_gripper_step_mm is None else cfg.max_gripper_step_mm
+    target[:3] = current[:3] + np.clip(target[:3] - current[:3], -max_pos_step, max_pos_step)
+    target[3:6] = current[3:6] + np.clip(target[3:6] - current[3:6], -max_rot_step, max_rot_step)
     target[6] = current[6] + float(
-        np.clip(target[6] - current[6], -cfg.max_gripper_step_mm, cfg.max_gripper_step_mm)
+        np.clip(target[6] - current[6], -max_gripper_step_mm, max_gripper_step_mm)
     )
     target[6] = float(np.clip(target[6], cfg.min_gripper_mm, cfg.max_gripper_mm))
     return target
@@ -220,9 +237,9 @@ class PiperPikaClientConfig:
     camera_height: int = 480
     camera_fps: int = DEFAULT_FPS
     image_size: int = 224
-    max_pos_step: float = 0.01
-    max_rot_step: float = 0.05
-    max_gripper_step_mm: float = 5.0
+    max_pos_step: float | None = None
+    max_rot_step: float | None = None
+    max_gripper_step_mm: float | None = None
     min_gripper_mm: float = 0.0
     max_gripper_mm: float = 90.0
 
@@ -241,6 +258,9 @@ class PiperPikaClientConfig:
             raise ValueError("chunk_size_threshold must be between 0 and 1")
         if self.fps <= 0:
             raise ValueError("fps must be positive")
+        step_limits = (self.max_pos_step, self.max_rot_step, self.max_gripper_step_mm)
+        if any(limit is not None and limit < 0 for limit in step_limits):
+            raise ValueError("step limits must be non-negative")
 
 
 class PiperArm:
@@ -272,6 +292,23 @@ class PiperArm:
             int(round(np.degrees(pitch) * 1000.0)),
             int(round(np.degrees(yaw) * 1000.0)),
         )
+        self.raise_for_status()
+
+    def raise_for_status(self) -> None:
+        snapshots = []
+        for name in ("GetArmStatus", "GetArmStatusMsgs"):
+            method = getattr(self.robot, name, None)
+            if method is not None:
+                snapshots.append(str(method()))
+        text = json.dumps(snapshots)
+        errors = [term for term in _PIPER_FATAL_STATUS_TERMS if term in text]
+        if "TARGET_POS_EXCEEDS_LIMIT" in errors:
+            logging.warning(
+                "Piper %s reported TARGET_POS_EXCEEDS_LIMIT; continuing", self.side
+            )
+            errors = [error for error in errors if error != "TARGET_POS_EXCEEDS_LIMIT"]
+        if errors:
+            raise RuntimeError(f"Piper {self.side} reported fatal status: {errors}")
 
 
 class PikaGripper:
