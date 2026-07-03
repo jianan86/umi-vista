@@ -16,6 +16,7 @@
 import logging
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pprint import pformat
 from typing import Any
 
@@ -36,6 +37,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 # from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
+from lerobot.utils.constants import OBS_STATE
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -52,6 +54,17 @@ from lerobot.utils.utils import (
 )
 
 from torch.utils.tensorboard import SummaryWriter
+
+
+@dataclass
+class UmiTrainPipelineConfig(TrainPipelineConfig):
+    zero_observation_state: bool = False
+
+
+def maybe_zero_observation_state(batch: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    if enabled:
+        batch[OBS_STATE] = torch.zeros_like(batch[OBS_STATE])
+    return batch
 
 
 def update_policy(
@@ -126,7 +139,7 @@ def update_policy(
 
 
 @parser.wrap()
-def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
+def train(cfg: UmiTrainPipelineConfig, accelerator: Accelerator | None = None):
     """
     Main function to train a policy.
 
@@ -378,6 +391,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         # import ipdb;ipdb.set_trace()
+        batch = maybe_zero_observation_state(batch, cfg.zero_observation_state)
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
