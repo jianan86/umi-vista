@@ -13,6 +13,7 @@ import pickle  # nosec
 import threading
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -20,6 +21,7 @@ import draccus
 import grpc
 import numpy as np
 import torch
+
 from lerobot.transport import services_pb2, services_pb2_grpc  # type: ignore
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
@@ -44,6 +46,7 @@ _PIPER_FATAL_STATUS_TERMS = (
     "MAIN_CONTROLLER_NTC_OVER_TEMPERATURE",
     "RELEASE_RESISTOR_NTC_OVER_TEMPERATURE",
 )
+DEVICE_GROUP_SUMMARY_PATH = "/home/kw/workspace/device_group/summary.json"
 
 R_EE_TCP = np.array(
     [
@@ -192,7 +195,7 @@ def center_crop_resize_rgb(image: np.ndarray, size: int = 224) -> np.ndarray:
     return np.ascontiguousarray(image.astype(np.uint8, copy=False))
 
 
-def limit_tcp_rpy_step(current: np.ndarray, target: np.ndarray, cfg: "PiperPikaClientConfig") -> np.ndarray:
+def limit_tcp_rpy_step(current: np.ndarray, target: np.ndarray, cfg: PiperPikaClientConfig) -> np.ndarray:
     target = np.asarray(target, dtype=np.float32).copy()
     current = np.asarray(current, dtype=np.float32)
     max_pos_step = np.inf if cfg.max_pos_step is None else cfg.max_pos_step
@@ -233,6 +236,7 @@ class PiperPikaClientConfig:
     right_pika_port: str = "/dev/ttyUSB1"
     left_fisheye_device: int | str = 0
     right_fisheye_device: int | str = 1
+    device_group_summary_path: str = DEVICE_GROUP_SUMMARY_PATH
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = DEFAULT_FPS
@@ -261,6 +265,56 @@ class PiperPikaClientConfig:
         step_limits = (self.max_pos_step, self.max_rot_step, self.max_gripper_step_mm)
         if any(limit is not None and limit < 0 for limit in step_limits):
             raise ValueError("step limits must be non-negative")
+
+
+@dataclass(frozen=True)
+class PikaDeviceBinding:
+    gripper_port: str
+    fisheye_device: str
+
+
+def load_pika_device_bindings(summary_path: str | Path) -> dict[str, PikaDeviceBinding]:
+    path = Path(summary_path)
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"device group summary not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid device group summary JSON: {path}") from exc
+
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        raise ValueError(f"device group summary must contain a groups list: {path}")
+
+    by_name = {group.get("device_name"): group for group in groups if isinstance(group, dict)}
+    return {
+        "left": _parse_pika_device_binding(by_name, "left_gripper"),
+        "right": _parse_pika_device_binding(by_name, "right_gripper"),
+    }
+
+
+def _parse_pika_device_binding(groups: dict[str, dict[str, Any]], group_name: str) -> PikaDeviceBinding:
+    group = groups.get(group_name)
+    if group is None:
+        raise RuntimeError(f"device group summary missing group: {group_name}")
+    if group.get("status") != "ok":
+        raise RuntimeError(f"device group {group_name} status is not ok: {group.get('status')}")
+
+    usb_port = group.get("usb_port")
+    fisheye = group.get("fisheye")
+    if not isinstance(usb_port, dict):
+        raise ValueError(f"device group {group_name} missing usb_port object")
+    if not isinstance(fisheye, dict):
+        raise ValueError(f"device group {group_name} missing fisheye object")
+
+    gripper_port = usb_port.get("devnode")
+    fisheye_device = fisheye.get("devnode")
+    if not gripper_port:
+        raise ValueError(f"device group {group_name} missing usb_port.devnode")
+    if not fisheye_device:
+        raise ValueError(f"device group {group_name} missing fisheye.devnode")
+
+    return PikaDeviceBinding(gripper_port=str(gripper_port), fisheye_device=str(fisheye_device))
 
 
 class PiperArm:
@@ -349,6 +403,13 @@ class PikaGripper:
 class PiperPikaHardware:
     def __init__(self, cfg: PiperPikaClientConfig):
         self.cfg = cfg
+        if cfg.device_group_summary_path:
+            bindings = load_pika_device_bindings(cfg.device_group_summary_path)
+            cfg.left_pika_port = bindings["left"].gripper_port
+            cfg.right_pika_port = bindings["right"].gripper_port
+            cfg.left_fisheye_device = bindings["left"].fisheye_device
+            cfg.right_fisheye_device = bindings["right"].fisheye_device
+
         self.left_arm = PiperArm("left", cfg.left_piper_can)
         self.right_arm = PiperArm("right", cfg.right_piper_can)
         self.left_gripper = PikaGripper(

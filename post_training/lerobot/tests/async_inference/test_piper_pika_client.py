@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import threading
 import time
@@ -13,18 +15,156 @@ from lerobot.async_inference.piper_pika_client import (
     PiperArm,
     PiperPikaClient,
     PiperPikaClientConfig,
+    PiperPikaHardware,
     center_crop_resize_rgb,
     ee_rpy_to_tcp_quat_state,
     limit_tcp_rpy_step,
+    load_pika_device_bindings,
     tcp_quat_action_to_ee_rpy,
 )
+
+BASE_SUMMARY = {
+    "groups": [
+        {
+            "device_name": "right_gripper",
+            "physical_device_id": "260622271788",
+            "status": "ok",
+            "usb_port": {"devnode": "/dev/ttyUSB2"},
+            "fisheye": {"devnode": "/dev/video25"},
+        },
+        {
+            "device_name": "left_gripper",
+            "physical_device_id": "412622273326",
+            "status": "ok",
+            "usb_port": {"devnode": "/dev/ttyUSB3"},
+            "fisheye": {"devnode": "/dev/video33"},
+        },
+    ]
+}
+
+
+def _write_summary(tmp_path, payload):
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_load_pika_device_bindings_reads_gripper_usb_and_fisheye(tmp_path):
+    bindings = load_pika_device_bindings(_write_summary(tmp_path, BASE_SUMMARY))
+
+    assert bindings["right"].gripper_port == "/dev/ttyUSB2"
+    assert bindings["right"].fisheye_device == "/dev/video25"
+    assert bindings["left"].gripper_port == "/dev/ttyUSB3"
+    assert bindings["left"].fisheye_device == "/dev/video33"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload["groups"].pop(), "left_gripper"),
+        (lambda payload: payload["groups"].pop(0), "right_gripper"),
+        (lambda payload: payload["groups"][0].__setitem__("status", "missing"), "status is not ok"),
+        (lambda payload: payload["groups"][0]["usb_port"].pop("devnode"), "usb_port.devnode"),
+        (lambda payload: payload["groups"][0]["fisheye"].pop("devnode"), "fisheye.devnode"),
+    ],
+)
+def test_load_pika_device_bindings_rejects_invalid_summary(tmp_path, mutate, message):
+    payload = copy.deepcopy(BASE_SUMMARY)
+    mutate(payload)
+
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        load_pika_device_bindings(_write_summary(tmp_path, payload))
+
+
+def test_load_pika_device_bindings_requires_summary_file(tmp_path):
+    with pytest.raises(RuntimeError, match="device group summary not found"):
+        load_pika_device_bindings(tmp_path / "missing.json")
+
+
+def test_load_pika_device_bindings_rejects_invalid_json(tmp_path):
+    path = tmp_path / "summary.json"
+    path.write_text("{invalid")
+
+    with pytest.raises(ValueError, match="invalid device group summary JSON"):
+        load_pika_device_bindings(path)
+
+
+def test_piper_pika_hardware_uses_device_group_summary(monkeypatch, tmp_path):
+    import lerobot.async_inference.piper_pika_client as client_module
+
+    grippers = []
+
+    class FakeArm:
+        def __init__(self, side, can_name):
+            self.side = side
+            self.can_name = can_name
+
+    class FakeGripper:
+        def __init__(self, side, port, fisheye_device, width, height, fps):
+            grippers.append((side, port, fisheye_device, width, height, fps))
+
+    monkeypatch.setattr(client_module, "PiperArm", FakeArm)
+    monkeypatch.setattr(client_module, "PikaGripper", FakeGripper)
+    cfg = PiperPikaClientConfig(
+        pretrained_name_or_path="test",
+        device_group_summary_path=str(_write_summary(tmp_path, BASE_SUMMARY)),
+    )
+
+    PiperPikaHardware(cfg)
+
+    assert cfg.left_pika_port == "/dev/ttyUSB3"
+    assert cfg.right_pika_port == "/dev/ttyUSB2"
+    assert cfg.left_fisheye_device == "/dev/video33"
+    assert cfg.right_fisheye_device == "/dev/video25"
+    assert grippers == [
+        ("left", "/dev/ttyUSB3", "/dev/video33", 640, 480, 30),
+        ("right", "/dev/ttyUSB2", "/dev/video25", 640, 480, 30),
+    ]
+
+
+def test_piper_pika_hardware_empty_summary_path_keeps_manual_config(monkeypatch):
+    import lerobot.async_inference.piper_pika_client as client_module
+
+    grippers = []
+
+    class FakeArm:
+        def __init__(self, side, can_name):
+            self.side = side
+            self.can_name = can_name
+
+    class FakeGripper:
+        def __init__(self, side, port, fisheye_device, width, height, fps):
+            grippers.append((side, port, fisheye_device))
+
+    monkeypatch.setattr(client_module, "PiperArm", FakeArm)
+    monkeypatch.setattr(client_module, "PikaGripper", FakeGripper)
+    monkeypatch.setattr(
+        client_module,
+        "load_pika_device_bindings",
+        lambda path: (_ for _ in ()).throw(AssertionError("summary should not be read")),
+    )
+    cfg = PiperPikaClientConfig(
+        pretrained_name_or_path="test",
+        left_pika_port="/dev/manual-left",
+        right_pika_port="/dev/manual-right",
+        left_fisheye_device="/dev/video-left",
+        right_fisheye_device="/dev/video-right",
+        device_group_summary_path="",
+    )
+
+    PiperPikaHardware(cfg)
+
+    assert grippers == [
+        ("left", "/dev/manual-left", "/dev/video-left"),
+        ("right", "/dev/manual-right", "/dev/video-right"),
+    ]
 
 
 class FakePiperStatus:
     def __init__(self, status: str):
         self.status = status
 
-    def GetArmStatus(self):
+    def GetArmStatus(self):  # noqa: N802
         return self.status
 
 
@@ -126,6 +266,7 @@ def test_piper_pika_queue_filters_executed_actions():
 
 def test_piper_pika_sends_previous_absolute_state(monkeypatch):
     import pickle
+
     import lerobot.async_inference.piper_pika_client as client_module
 
     class Hardware:
@@ -142,7 +283,7 @@ def test_piper_pika_sends_previous_absolute_state(monkeypatch):
         def __init__(self):
             self.observations = []
 
-        def SendObservations(self, payload):
+        def SendObservations(self, payload):  # noqa: N802
             self.observations.append(pickle.loads(payload))
 
     client = object.__new__(PiperPikaClient)
